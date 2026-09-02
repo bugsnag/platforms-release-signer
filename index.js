@@ -1,6 +1,7 @@
 const fs = require('node:fs')
 const { execFileSync } = require('node:child_process')
 const core = require('@actions/core')
+const { isSafeFilename, isValidKeyId, redact_secrets } = require('./lib/validators')
 
 // Given a repo, release, API key, and gpg key
 const github_token = core.getInput('github_token')
@@ -12,25 +13,6 @@ const key_passphrase = core.getInput('key_passphrase')
 // Mask secrets so the Actions runner redacts them from any log output
 if (key_passphrase) core.setSecret(key_passphrase)
 if (key_id) core.setSecret(key_id)
-
-const RESERVED_FILENAMES = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$/i
-
-function isSafeFilename(name) {
-    // allow only simple filenames (no path separators/traversal, no leading '-' to avoid
-    // being parsed as a flag, no reserved device names, and a reasonable length limit)
-    if (typeof name !== 'string' || name.length === 0 || name.length > 255) {
-        return false
-    }
-    if (name === '.' || name === '..' || name.startsWith('-') || RESERVED_FILENAMES.test(name)) {
-        return false
-    }
-    return /^[A-Za-z0-9._-]+$/.test(name)
-}
-
-function isValidKeyId(id) {
-    // simple allowlist: hex fingerprint or short key id, optional 0x prefix
-    return typeof id === 'string' && /^(0x)?[0-9A-Fa-f]+$/.test(id)
-}
 
 async function main() {
     // GPG installed, key present
@@ -88,8 +70,10 @@ async function main() {
             fail_and_exit(`Invalid asset name: ${asset.name}`)
         }
         const outAsc = `${asset.name}.asc`
-        // '--' marks end of options so a crafted filename can't be parsed as a gpg flag
-        run_command('gpg', ['--batch', '--pinentry-mode', 'loopback', '--armor', '--output', outAsc, '--local-user', key_id, '--passphrase', key_passphrase, '--detach-sig', '--', asset.name])
+        // '--' marks end of options so a crafted filename can't be parsed as a gpg flag.
+        // Passphrase is fed over stdin (--passphrase-fd 0) so it never appears in argv,
+        // process listings (e.g. `ps aux`), or command-failure error messages.
+        run_command('gpg', ['--batch', '--pinentry-mode', 'loopback', '--armor', '--output', outAsc, '--local-user', key_id, '--passphrase-fd', '0', '--detach-sig', '--', asset.name], { input: key_passphrase })
         run_command('gpg', ['--batch', '--verify', '--', outAsc, asset.name])
     })
 
@@ -102,20 +86,12 @@ async function main() {
 }
 
 
-function run_command(command, args = []) {
+function run_command(command, args = [], options = {}) {
     try {
-        return execFileSync(command, args, { timeout: 10000, encoding: 'utf8' })
+        return execFileSync(command, args, { timeout: 10000, encoding: 'utf8', ...options })
     } catch (error) {
-        fail_and_exit(redact_secrets(error.message))
+        fail_and_exit(redact_secrets(error.message, key_passphrase))
     }
-}
-
-function redact_secrets(message) {
-    // execFileSync failure messages include the full argv, which can contain key_passphrase
-    if (typeof message !== 'string' || !key_passphrase) {
-        return message
-    }
-    return message.split(key_passphrase).join('***REDACTED***')
 }
 
 async function get_release() {
@@ -222,4 +198,7 @@ function fail_and_exit(message) {
     process.exit(1)
 }
 
-main()
+// Only auto-run when executed directly (e.g. `node index.js`), not when required by tests
+if (require.main === module) {
+    main()
+}
