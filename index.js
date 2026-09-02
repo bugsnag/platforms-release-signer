@@ -1,5 +1,5 @@
 const fs = require('node:fs')
-const { execSync } = require('node:child_process')
+const { execFileSync } = require('node:child_process')
 const core = require('@actions/core')
 
 // Given a repo, release, API key, and gpg key
@@ -9,13 +9,26 @@ const release_tag = core.getInput('release_tag')
 const key_id = core.getInput('key_id')
 const key_passphrase = core.getInput('key_passphrase')
 
+function isSafeFilename(name) {
+    // allow only simple filenames (no path separators) and limited chars
+    return typeof name === 'string' && /^[A-Za-z0-9._-]+$/.test(name)
+}
+
+function isValidKeyId(id) {
+    // simple allowlist: hex fingerprint or short key id, optional 0x prefix
+    return typeof id === 'string' && /^(0x)?[0-9A-Fa-f]+$/.test(id)
+}
+
 async function main() {
     // GPG installed, key present
-    let gpg_version = run_command('gpg --version')
-    if (gpg_version.includes('not found')) {
+    let gpg_version = run_command('gpg', ['--version'])
+    if (String(gpg_version).includes('not found')) {
         fail_and_exit('GPG not found')
     }
-    let key_present = run_command(`gpg --list-keys ${key_id}`)
+    if (!isValidKeyId(key_id)) {
+        fail_and_exit('Invalid key_id format')
+    }
+    let key_present = run_command('gpg', ['--list-keys', key_id])
     if  (key_present.includes('not found')) {
         fail_and_exit('GPG key not found')
     }
@@ -58,8 +71,12 @@ async function main() {
     // Some assertion here to check all the downloads were successful
 
     release_assets.forEach(asset => {
-        run_command(`gpg --batch --pinentry-mode loopback --armor --output ${asset.name}.asc --local-user ${key_id} --passphrase ${key_passphrase} --detach-sig ${asset.name}`)
-        run_command(`gpg --batch --verify ${asset.name}.asc ${asset.name}`)
+        if (!isSafeFilename(asset.name)) {
+            fail_and_exit(`Invalid asset name: ${asset.name}`)
+        }
+        const outAsc = `${asset.name}.asc`
+        run_command('gpg', ['--batch', '--pinentry-mode', 'loopback', '--armor', '--output', outAsc, '--local-user', key_id, '--passphrase', key_passphrase, '--detach-sig', asset.name])
+        run_command('gpg', ['--batch', '--verify', outAsc, asset.name])
     })
 
     // Upload the signed assets
@@ -71,9 +88,9 @@ async function main() {
 }
 
 
-function run_command(command) {
+function run_command(command, args = []) {
     try {
-        return execSync(command, { timeout: 10000})
+        return execFileSync(command, args, { timeout: 10000, encoding: 'utf8' })
     } catch (error) {
         fail_and_exit(error.message)
     }
