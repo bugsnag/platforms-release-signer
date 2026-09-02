@@ -1,7 +1,7 @@
 {
   "name": "release-signer",
   "version": "0.1.0",
-  "description": "An action for automatically donwloading and signing releases",
+  "description": "An action for automatically downloading and signing releases",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -9,7 +9,9 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@actions/core": "^1.11.1",
-    "@actions/github": "^6.0.0"
+    "@actions/core": "^3.0.1",
+    "@actions/github": "^6.0.0",
+    "@actions/http-client": "^4.0.1",
+    "undici": "^6.24.0"
   }
 }
