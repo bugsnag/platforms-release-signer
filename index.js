@@ -9,9 +9,22 @@ const release_tag = core.getInput('release_tag')
 const key_id = core.getInput('key_id')
 const key_passphrase = core.getInput('key_passphrase')
 
+// Mask secrets so the Actions runner redacts them from any log output
+if (key_passphrase) core.setSecret(key_passphrase)
+if (key_id) core.setSecret(key_id)
+
+const RESERVED_FILENAMES = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$/i
+
 function isSafeFilename(name) {
-    // allow only simple filenames (no path separators) and limited chars
-    return typeof name === 'string' && /^[A-Za-z0-9._-]+$/.test(name)
+    // allow only simple filenames (no path separators/traversal, no leading '-' to avoid
+    // being parsed as a flag, no reserved device names, and a reasonable length limit)
+    if (typeof name !== 'string' || name.length === 0 || name.length > 255) {
+        return false
+    }
+    if (name === '.' || name === '..' || name.startsWith('-') || RESERVED_FILENAMES.test(name)) {
+        return false
+    }
+    return /^[A-Za-z0-9._-]+$/.test(name)
 }
 
 function isValidKeyId(id) {
@@ -75,8 +88,9 @@ async function main() {
             fail_and_exit(`Invalid asset name: ${asset.name}`)
         }
         const outAsc = `${asset.name}.asc`
-        run_command('gpg', ['--batch', '--pinentry-mode', 'loopback', '--armor', '--output', outAsc, '--local-user', key_id, '--passphrase', key_passphrase, '--detach-sig', asset.name])
-        run_command('gpg', ['--batch', '--verify', outAsc, asset.name])
+        // '--' marks end of options so a crafted filename can't be parsed as a gpg flag
+        run_command('gpg', ['--batch', '--pinentry-mode', 'loopback', '--armor', '--output', outAsc, '--local-user', key_id, '--passphrase', key_passphrase, '--detach-sig', '--', asset.name])
+        run_command('gpg', ['--batch', '--verify', '--', outAsc, asset.name])
     })
 
     // Upload the signed assets
@@ -92,8 +106,16 @@ function run_command(command, args = []) {
     try {
         return execFileSync(command, args, { timeout: 10000, encoding: 'utf8' })
     } catch (error) {
-        fail_and_exit(error.message)
+        fail_and_exit(redact_secrets(error.message))
     }
+}
+
+function redact_secrets(message) {
+    // execFileSync failure messages include the full argv, which can contain key_passphrase
+    if (typeof message !== 'string' || !key_passphrase) {
+        return message
+    }
+    return message.split(key_passphrase).join('***REDACTED***')
 }
 
 async function get_release() {
