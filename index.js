@@ -1,6 +1,7 @@
 const fs = require('node:fs')
-const { execSync } = require('node:child_process')
+const { execFileSync } = require('node:child_process')
 const core = require('@actions/core')
+const { isSafeFilename, isValidKeyId, redact_secrets } = require('./lib/validators')
 
 // Given a repo, release, API key, and gpg key
 const github_token = core.getInput('github_token')
@@ -9,13 +10,20 @@ const release_tag = core.getInput('release_tag')
 const key_id = core.getInput('key_id')
 const key_passphrase = core.getInput('key_passphrase')
 
+// Mask secrets so the Actions runner redacts them from any log output
+if (key_passphrase) core.setSecret(key_passphrase)
+if (key_id) core.setSecret(key_id)
+
 async function main() {
     // GPG installed, key present
-    let gpg_version = run_command('gpg --version')
-    if (gpg_version.includes('not found')) {
+    let gpg_version = run_command('gpg', ['--version'])
+    if (String(gpg_version).includes('not found')) {
         fail_and_exit('GPG not found')
     }
-    let key_present = run_command(`gpg --list-keys ${key_id}`)
+    if (!isValidKeyId(key_id)) {
+        fail_and_exit('Invalid key_id format')
+    }
+    let key_present = run_command('gpg', ['--list-keys', key_id])
     if  (key_present.includes('not found')) {
         fail_and_exit('GPG key not found')
     }
@@ -58,8 +66,15 @@ async function main() {
     // Some assertion here to check all the downloads were successful
 
     release_assets.forEach(asset => {
-        run_command(`gpg --batch --pinentry-mode loopback --armor --output ${asset.name}.asc --local-user ${key_id} --passphrase ${key_passphrase} --detach-sig ${asset.name}`)
-        run_command(`gpg --batch --verify ${asset.name}.asc ${asset.name}`)
+        if (!isSafeFilename(asset.name)) {
+            fail_and_exit(`Invalid asset name: ${asset.name}`)
+        }
+        const outAsc = `${asset.name}.asc`
+        // '--' marks end of options so a crafted filename can't be parsed as a gpg flag.
+        // Passphrase is fed over stdin (--passphrase-fd 0) so it never appears in argv,
+        // process listings (e.g. `ps aux`), or command-failure error messages.
+        run_command('gpg', ['--batch', '--pinentry-mode', 'loopback', '--armor', '--output', outAsc, '--local-user', key_id, '--passphrase-fd', '0', '--detach-sig', '--', asset.name], { input: key_passphrase })
+        run_command('gpg', ['--batch', '--verify', '--', outAsc, asset.name])
     })
 
     // Upload the signed assets
@@ -71,11 +86,11 @@ async function main() {
 }
 
 
-function run_command(command) {
+function run_command(command, args = [], options = {}) {
     try {
-        return execSync(command, { timeout: 10000})
+        return execFileSync(command, args, { timeout: 10000, encoding: 'utf8', ...options })
     } catch (error) {
-        fail_and_exit(error.message)
+        fail_and_exit(redact_secrets(error.message, key_passphrase))
     }
 }
 
@@ -183,4 +198,7 @@ function fail_and_exit(message) {
     process.exit(1)
 }
 
-main()
+// Only auto-run when executed directly (e.g. `node index.js`), not when required by tests
+if (require.main === module) {
+    main()
+}
